@@ -1,0 +1,28 @@
+{
+  "name": "searxng-mcp",
+  "version": "2.0.0",
+  "description": "Privacy-focused web search MCP server for Claude Desktop",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "searxng-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node src/test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cheerio": "^1.0.0",
+    "node-fetch": "^3.3.0"
+  },
+  "keywords": [
+    "mcp",
+    "search",
+    "privacy",
+    "claude",
+    "duckduckgo"
+  ],
+  "author": "",
+  "license": "MIT"
+}

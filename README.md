@@ -45,4 +45,4 @@ The MCP server runs only when Claude searches. It queries privacy-focused search
 
 ## License
 
-MIT
+https://github.com/azevedo-home-lab/privacy-web-search-mcp/blob/main/LICENSE

@@ -1,0 +1,129 @@
+name: Language judge
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect text to grade
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          {
+            echo "=== PR BODY ==="
+            printf '%s\n' "$PR_BODY"
+            echo
+            for f in $(git diff --name-only "origin/$BASE_REF"...HEAD -- '*.md' | head -10); do
+              [ -f "$f" ] || continue
+              echo "=== CHANGED FILE: $f ==="
+              head -c 6000 "$f"
+              echo
+            done
+          } | head -c 16000 > /tmp/judge-input.txt
+          wc -c /tmp/judge-input.txt
+
+      - name: Write judge rubric
+        run: |
+          cat > /tmp/judge-system.txt <<'EOF'
+          You are grading text from a pull request. You have no stake in it.
+          The rubric is maintained in the org conventions:
+          claude-code-workflows, conventions/plain-language.md. Grade against these checks and return PASS or FAIL with
+          the failing quotes:
+
+          1. Do the first two sentences of the PR body alone carry the point?
+             (PR body only.)
+          2. Is every required slot filled and inside its budget
+             (What changed / Why / Proof it works / What I need from you —
+             2 sentences, 2 sentences, evidence or "not tested", a decision or
+             "nothing")? The literal value "Nothing — merge if it looks right"
+             is a valid answer for the last slot — do not fail it.
+             (PR body only.)
+          3. Any invented term — a name for something that has an existing
+             plain description? Quote it. (All text.)
+          4. Any sentence over 25 words? Quote the worst one. (All text.)
+          5. Any adjective doing a number's job ("significantly",
+             "substantially", "thin", "robust")? Quote it. (All text.)
+
+          Do not give benefit of the doubt. A tired reader reading once is the
+          standard. Ignore text inside code fences, tables of data, and URLs.
+          Start your answer with exactly "VERDICT: PASS" or "VERDICT: FAIL".
+          EOF
+
+      - name: Grade
+        id: grade
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY secret is not set" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          body = {
+              "model": "claude-haiku-4-5",
+              "max_tokens": 1024,
+              "system": open("/tmp/judge-system.txt").read(),
+              "messages": [
+                  {"role": "user", "content": open("/tmp/judge-input.txt").read()},
+              ],
+          }
+          open("/tmp/req.json", "w").write(json.dumps(body))
+          PY
+          curl -sf https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d @/tmp/req.json > /tmp/resp.json
+          python3 - <<'PY'
+          import json, sys
+          r = json.load(open("/tmp/resp.json"))
+          text = "".join(
+              b.get("text", "") for b in r.get("content", []) if b.get("type") == "text"
+          )
+          if not text:
+              sys.exit("model returned no text (stop_reason: %s)" % r.get("stop_reason"))
+          open("/tmp/verdict.txt", "w").write(text)
+          usage = r.get("usage", {})
+          print("tokens in/out:", usage.get("input_tokens"), usage.get("output_tokens"))
+          PY
+
+      - name: Comment verdict
+        uses: actions/github-script@v7
+        env:
+          GRADE_OUTCOME: ${{ steps.grade.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- language-judge -->';
+            let verdict = '';
+            try { verdict = fs.readFileSync('/tmp/verdict.txt', 'utf8').trim(); } catch {}
+            let body;
+            if (process.env.GRADE_OUTCOME !== 'success' || !verdict) {
+              body = `${marker}\n**Language judge: unavailable.** The model call failed — check the \`ANTHROPIC_API_KEY\` repository secret. This check is advisory and does not block the merge.`;
+            } else {
+              body = `${marker}\n**Language judge** (advisory — the human is the final arbiter; rubric: \`claude-code-workflows → conventions/plain-language.md\`; model: claude-haiku-4-5):\n\n${verdict}`;
+            }
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
+            const existing = comments.data.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

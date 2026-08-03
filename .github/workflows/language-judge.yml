@@ -26,22 +26,55 @@ jobs:
             echo "=== PR BODY ==="
             printf '%s\n' "$PR_BODY"
             echo
-            for f in $(git diff --name-only "origin/$BASE_REF"...HEAD -- '*.md' | head -10); do
-              [ -f "$f" ] || continue
-              echo "=== CHANGED FILE: $f ==="
-              head -c 6000 "$f"
-              echo
-            done
+            echo "=== ADDED MARKDOWN LINES ==="
+            git diff "origin/$BASE_REF"...HEAD -- '*.md' | grep '^+' | grep -v '^+++' | cut -c2- | head -c 10000
           } | head -c 16000 > /tmp/judge-input.txt
           wc -c /tmp/judge-input.txt
+
+      - name: Compute check 4 (sentence length)
+        run: |
+          python3 - <<'PY'
+          import re
+
+          def violations(text):
+              text = re.sub(r"```.*?```", "", text, flags=re.S)
+              out = []
+              for para in re.split(r"\n\s*\n", text):
+                  lines = [l for l in para.splitlines() if l.strip()]
+                  if not lines:
+                      continue
+                  marker = re.compile(r"^\s*([#>|*-]|\d+\.|===)")
+                  units = lines if all(marker.match(l) for l in lines) else [" ".join(lines)]
+                  for unit in units:
+                      unit = marker.sub("", unit).strip()
+                      for sent in re.split(r"(?<=[.!?])\s+", unit):
+                          words = [w for w in sent.split() if re.search(r"[A-Za-z0-9]", w)]
+                          if len(words) > 25:
+                              out.append((len(words), sent.strip()[:200]))
+              return out
+
+          text = open("/tmp/judge-input.txt").read()
+          with open("/tmp/check4.txt", "w") as f:
+              v = violations(text)
+              if v:
+                  for n, s in v:
+                      f.write('- %d words: "%s"\n' % (n, s))
+              else:
+                  f.write("(no sentences over 25 words)\n")
+          print(open("/tmp/check4.txt").read())
+          PY
+          {
+            echo
+            echo "=== CHECK 4 (COMPUTED) ==="
+            cat /tmp/check4.txt
+          } >> /tmp/judge-input.txt
 
       - name: Write judge rubric
         run: |
           cat > /tmp/judge-system.txt <<'EOF'
           You are grading text from a pull request. You have no stake in it.
           The rubric is maintained in the org conventions:
-          claude-code-workflows, conventions/plain-language.md. Grade against these checks and return PASS or FAIL with
-          the failing quotes:
+          claude-code-workflows, conventions/plain-language.md. Grade against these checks, quoting every failure:
 
           1. Do the first two sentences of the PR body alone carry the point?
              (PR body only.)
@@ -53,13 +86,16 @@ jobs:
              (PR body only.)
           3. Any invented term — a name for something that has an existing
              plain description? Quote it. (All text.)
-          4. Any sentence over 25 words? Quote the worst one. (All text.)
+          4. Sentence length is computed mechanically and appears under
+             "CHECK 4 (COMPUTED)". Do not count words yourself; treat that
+             list as final. An empty list means check 4 passes.
           5. Any adjective doing a number's job ("significantly",
              "substantially", "thin", "robust")? Quote it. (All text.)
 
           Do not give benefit of the doubt. A tired reader reading once is the
           standard. Ignore text inside code fences, tables of data, and URLs.
-          Start your answer with exactly "VERDICT: PASS" or "VERDICT: FAIL".
+          End with exactly "VERDICT: PASS" or "VERDICT: FAIL" as the last
+          line.
           EOF
 
       - name: Grade
@@ -116,7 +152,7 @@ jobs:
             if (process.env.GRADE_OUTCOME !== 'success' || !verdict) {
               body = `${marker}\n**Language judge: unavailable.** The model call failed — check the \`ANTHROPIC_API_KEY\` repository secret. This check is advisory and does not block the merge.`;
             } else {
-              body = `${marker}\n**Language judge** (advisory — the human is the final arbiter; rubric: \`claude-code-workflows → conventions/plain-language.md\`; model: claude-haiku-4-5):\n\n${verdict}`;
+              body = `${marker}\n**Language judge** (advisory — the human is the final arbiter; rubric: \`claude-code-workflows → conventions/plain-language.md\`; model: claude-haiku-4-5; word counts computed by script):\n\n${verdict}`;
             }
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
